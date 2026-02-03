@@ -32,6 +32,7 @@ const Create = () => {
   });
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [isPublic, setIsPublic] = useState(true); // Default to public
 
   // Auto-save effects
   React.useEffect(() => {
@@ -188,6 +189,7 @@ const Create = () => {
         const response = await api.post('/game/create', {
             ...formData,
             locations,
+            isPublic,
             userId: user?.id // Temporary until backend middleware extracts from token
         });
         
@@ -237,6 +239,20 @@ const Create = () => {
             onChange={(e) => setFormData({ ...formData, difficulty: parseInt(e.target.value) })}
             required
           />
+        </div>
+
+        <div className="flex items-center gap-3 border rounded p-3 bg-gray-50">
+          <input
+            type="checkbox"
+            id="isPublic"
+            checked={isPublic}
+            onChange={(e) => setIsPublic(e.target.checked)}
+            className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+          <label htmlFor="isPublic" className="text-sm cursor-pointer select-none">
+            <span className="font-medium text-gray-900 block">Make Public</span>
+            <span className="text-gray-500">Visible to everyone on the homepage</span>
+          </label>
         </div>
 
         <div className="border-t pt-4">
