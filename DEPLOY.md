@@ -6,16 +6,35 @@
 
 首先，您需要登录到您的阿里云主机并安装 Docker。
 
+**原理解释**：阿里云 ECS 相当于一台裸机（或虚拟机），而 Docker 是运行在操作系统上的应用容器引擎。在 ECS 上安装 Docker 是业界的标准做法，它能让您的应用环境与宿主机解耦，方便部署和管理。
+
+### 1.1 安装 Docker
+推荐使用阿里云官方镜像源进行安装，速度更快。
+
 ```bash
 # SSH 登录
 ssh root@120.79.42.38
 
-# 安装 Docker (如果尚未安装)
-curl -fsSL https://get.docker.com | bash
+# 使用官方脚本自动安装 (会自动选择国内镜像源)
+curl -fsSL https://get.docker.com | bash -s docker --mirror Aliyun
 
 # 启动 Docker 并设置开机自启
 systemctl start docker
 systemctl enable docker
+```
+
+### 1.2 配置 Docker 镜像加速 (强烈推荐)
+由于国内网络原因，直接拉取 Docker 镜像可能会很慢。建议配置阿里云镜像加速器。
+
+```bash
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json <<-'EOF'
+{
+  "registry-mirrors": ["https://docker.m.daocloud.io", "https://dockerproxy.com"]
+}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
 ```
 
 ## 2. 配置 SSH 免密登录
