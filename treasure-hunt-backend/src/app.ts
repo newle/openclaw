@@ -19,7 +19,12 @@ app.use("/api", apiRoutes);
 
 // Health Check
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({ 
+    status: "ok", 
+    timestamp: new Date().toISOString(),
+    node_version: process.version,
+    app_version: "1.0.1" // Bump version to verify deployment
+  });
 });
 
 // 404 Handler

@@ -1,7 +1,7 @@
 # ==========================================
 # Stage 1: Build Frontend
 # ==========================================
-FROM node:18-alpine as frontend-builder
+FROM node:20-alpine as frontend-builder
 WORKDIR /app/frontend
 
 # Install dependencies
