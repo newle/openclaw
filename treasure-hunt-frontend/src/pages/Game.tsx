@@ -73,6 +73,27 @@ const Game = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useUserStore();
+  
+  // Share function
+  const handleShare = () => {
+      // Create shareable link
+      // Current URL should be /game/:id
+      const shareUrl = window.location.href;
+      
+      // Copy to clipboard
+      if (navigator.clipboard) {
+          navigator.clipboard.writeText(shareUrl).then(() => {
+              alert("Link copied to clipboard! Share it with your friends.");
+          }).catch(err => {
+              console.error('Failed to copy: ', err);
+              // Fallback
+              prompt("Copy this link to share:", shareUrl);
+          });
+      } else {
+          prompt("Copy this link to share:", shareUrl);
+      }
+  };
+
   const [loading, setLoading] = useState(true);
   const [verifying, setVerifying] = useState(false);
   const [photo, setPhoto] = useState<string | null>(null);
@@ -449,6 +470,14 @@ const Game = () => {
                  }
              }} className="absolute top-4 left-4 z-[1000] bg-black/50 p-2 rounded-full hover:bg-black/70 transition">
                  <ArrowLeft size={20} />
+             </button>
+             
+             {/* Share Button (Top Right) */}
+             <button 
+                onClick={handleShare}
+                className="absolute top-4 right-4 z-[1000] bg-black/50 px-3 py-2 rounded-full hover:bg-black/70 transition flex items-center gap-2 text-sm font-medium"
+             >
+                 📤 Share
              </button>
              
              <div className="flex-1 relative z-10">
