@@ -60,33 +60,6 @@ const Home = () => {
     fetchTreasures();
   }, [user]);
 
-  // Handle clipboard paste button
-  const handlePasteLink = async () => {
-      try {
-          const text = await navigator.clipboard.readText();
-          if (!text) return;
-          
-          // Basic validation: look for UUID or specific URL pattern
-          // e.g. http://.../game/UUID or just UUID
-          // Let's look for UUID pattern
-          const uuidRegex = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
-          const match = text.match(uuidRegex);
-          
-          if (match) {
-              const treasureId = match[0];
-              // Navigate to game
-              // We could verify it exists first via API, but let's just go there.
-              // Use window.location or navigate
-              window.location.href = `/game/${treasureId}`;
-          } else {
-              alert("No valid treasure code found in clipboard.");
-          }
-      } catch (e) {
-          console.error("Clipboard error:", e);
-          alert("Unable to read clipboard. Please ensure you granted permission.");
-      }
-  };
-
   // Handle manual code join
   const handleJoinByCode = async () => {
       if (!joinCode || joinCode.length !== 4) {
@@ -117,12 +90,6 @@ const Home = () => {
                 className="text-xs bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 py-1.5 rounded-full font-medium transition"
              >
                  🔑 Join Private
-             </button>
-             <button 
-                onClick={handlePasteLink}
-                className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-1.5 rounded-full font-medium transition"
-             >
-                 📋 Paste
              </button>
              <div className="text-sm text-gray-600">
                 {user?.email}
