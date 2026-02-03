@@ -15,7 +15,7 @@ RUN npm run build
 # ==========================================
 # Stage 2: Build Backend & Final Runtime
 # ==========================================
-FROM node:18-bullseye-slim
+FROM node:20-bullseye-slim
 
 # 1. Install System Dependencies (Python 3)
 RUN apt-get update && apt-get install -y \
