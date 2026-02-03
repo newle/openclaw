@@ -62,11 +62,11 @@ jobs:
             docker rm treasure-hunt || true
             
             # Run new container
-            # Map port 80 on host to 3000 in container
+            # Map port 3000 on host to 3000 in container (Nginx will proxy to 3000)
             docker run -d \
               --name treasure-hunt \
               --restart always \
-              -p 80:3000 \
+              -p 3000:3000 \
               -e SUPABASE_URL=${{ secrets.SUPABASE_URL }} \
               -e SUPABASE_KEY=${{ secrets.SUPABASE_KEY }} \
               -e SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }} \

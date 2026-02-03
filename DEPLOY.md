@@ -78,16 +78,52 @@ chmod 700 ~/.ssh
 
 配置完成后：
 1. 修改本地代码。
-2. `git commit` 并 `git push origin main`。
+2. `git commit` 并 `git push origin main`。 
 3. GitHub Actions 将自动触发：
    - 构建 Docker 镜像。
    - 推送到 GitHub Container Registry (ghcr.io)。
    - SSH 登录服务器。
    - 拉取新镜像并重启容器。
 
-## 5. 访问应用
+## 5. Nginx 反向代理配置 (推荐)
 
-部署成功后，直接访问服务器 IP 即可：
-http://120.79.42.38
+由于您的服务器 80 端口已被 Nginx 占用，我们需要修改部署策略：
+1. **Docker 容器**：运行在 `3000` 端口 (已在 `deploy.yml` 中自动修改)。
+2. **Nginx**：作为反向代理，将 80 端口的流量转发给本地的 3000 端口。
 
-(应用已映射到服务器的 80 端口)
+### 5.1 修改 Nginx 配置
+登录服务器，编辑 Nginx 配置文件 (通常在 `/etc/nginx/nginx.conf` 或 `/etc/nginx/conf.d/default.conf`)。
+
+添加或修改 `server` 块：
+
+```nginx
+server {
+    listen 80;
+    server_name _;  # 或者填写您的域名，如 example.com
+
+    location / {
+        proxy_pass http://120.79.42.38:3000; # 转发到 Docker 容器端口
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        
+        # 获取真实 IP
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+### 5.2 重载 Nginx
+配置修改完成后，检查语法并重载：
+```bash
+nginx -t
+nginx -s reload
+```
+
+现在，访问 http://120.79.42.38 (80端口) 就会自动转发到您的寻宝游戏应用了。
+
+## 6. 访问应用
+
