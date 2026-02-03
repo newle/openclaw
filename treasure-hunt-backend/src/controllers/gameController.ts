@@ -61,7 +61,9 @@ function parseCoordinates(input: any): { lat: number, lng: number } | null {
 
 export const getTreasures = async (req: Request, res: Response) => {
   try {
-    const { data: treasures, error } = await supabase
+    const userId = req.query.userId as string;
+
+    let query = supabase
       .from("treasures")
       .select(`
         *,
@@ -71,9 +73,42 @@ export const getTreasures = async (req: Request, res: Response) => {
       .eq('is_active', true)
       .order('created_at', { ascending: false });
 
-    if (error) throw error;
+    // Filter by userId if provided to show only user's treasures
+    // Or if we want to show public treasures AND user's private ones?
+    // Requirement: "只有自己可以看见" implies we want to filter list by creator_id = userId
+    // BUT usually home page shows ALL public treasures.
+    // If user means "When I create a treasure, it is visible to everyone, but I want it private initially?"
+    // The current createTreasure sets is_public: true by default.
+    
+    // If the requirement is "The treasures I create should be private by default", we should change createTreasure.
+    // If the requirement is "I only want to see MY created treasures on the list", we filter here.
+    
+    // Assuming user wants to filter the LIST to see only their own for now based on "怎么只有自己可以看见呢" 
+    // context: "默认创建的寻宝全员可见" (Default created are public) -> "现在怎么只有自己可以看见呢" (How to make it so only I can see it?)
+    // Answer: We should change createTreasure to set is_public = false, OR allow filtering.
+    
+    // Let's modify createTreasure to accept is_public flag, defaulting to false? 
+    // Or just change the query here? 
+    // Re-reading: "默认创建的寻宝全员可见。现在怎么只有自己可以看见呢？" 
+    // This sounds like a request to change the behavior of CREATION to be private, OR the LISTING to respect privacy.
+    
+    // Let's assume the user wants to know HOW to make a treasure private.
+    // I will modify `createTreasure` to allow setting `is_public` and default it to `false` (private).
+    // AND modify `getTreasures` to show:
+    // 1. All public treasures
+    // 2. Private treasures created by the current user
+    
+    if (userId) {
+       // Logic: (is_public = true) OR (creator_id = userId)
+       // Supabase .or() syntax
+       query = query.or(`is_public.eq.true,creator_id.eq.${userId}`);
+    } else {
+       query = query.eq('is_public', true);
+    }
 
-    const userId = req.query.userId as string;
+    const { data: treasures, error } = await query;
+
+    if (error) throw error;
 
     const resultPromises = treasures.map(async (t: any) => {
         // 2. Get Progress
@@ -245,7 +280,7 @@ export const startGame = async (req: Request, res: Response) => {
 
 export const createTreasure = async (req: Request, res: Response) => {
   try {
-    const { title, description, difficulty, locations } = req.body;
+    const { title, description, difficulty, locations, isPublic } = req.body;
     // Assuming we have middleware to extract userId from token
     const userId = req.body.userId; // Temporary: expect client to send userId for now or use middleware
 
@@ -278,7 +313,7 @@ export const createTreasure = async (req: Request, res: Response) => {
         title,
         description,
         difficulty,
-        is_public: true,
+        is_public: isPublic !== undefined ? isPublic : false, // Default to false (private) if not specified
         // Use the first location as the center location for now
         center_location: `POINT(${locations[0].lng} ${locations[0].lat})`
       })
