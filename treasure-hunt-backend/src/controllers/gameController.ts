@@ -355,7 +355,7 @@ export const verifyLocation = async (req: Request, res: Response) => {
     }
 
     // Compress candidate photo immediately for faster matching and later upload
-    let processedCandidateBuffer = candidateBuffer;
+    let processedCandidateBuffer: Buffer = candidateBuffer;
     try {
         const processed = await processImage(candidateBuffer, "verification.jpg", "image/jpeg");
         processedCandidateBuffer = processed.buffer;

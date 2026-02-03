@@ -3,7 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import path from "path";
-import apiRoutes from "./routes";
+import apiRoutes from "./routes/index.js";
 
 const app = express();
 
