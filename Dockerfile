@@ -1,42 +1,64 @@
-FROM node:22-bookworm
+# ==========================================
+# Stage 1: Build Frontend
+# ==========================================
+FROM node:18-alpine as frontend-builder
+WORKDIR /app/frontend
 
-# Install Bun (required for build scripts)
-RUN curl -fsSL https://bun.sh/install | bash
-ENV PATH="/root/.bun/bin:${PATH}"
+# Install dependencies
+COPY treasure-hunt-frontend/package*.json ./
+RUN npm install
 
-RUN corepack enable
+# Build frontend
+COPY treasure-hunt-frontend/ .
+RUN npm run build
+
+# ==========================================
+# Stage 2: Build Backend & Final Runtime
+# ==========================================
+FROM node:18-bullseye-slim
+
+# 1. Install System Dependencies (Python 3)
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-ARG OPENCLAW_DOCKER_APT_PACKAGES=""
-RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
-      apt-get update && \
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $OPENCLAW_DOCKER_APT_PACKAGES && \
-      apt-get clean && \
-      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
-    fi
+# 2. Setup Python Environment
+ENV VIRTUAL_ENV=/app/venv
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
-COPY ui/package.json ./ui/package.json
-COPY patches ./patches
-COPY scripts ./scripts
+# 3. Install Python Dependencies
+# We use CPU-only version of PyTorch to reduce image size (~700MB vs ~3GB)
+COPY treasure-hunt-backend/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
-RUN pnpm install --frozen-lockfile
+# 4. Setup Backend
+WORKDIR /app/backend
+COPY treasure-hunt-backend/package*.json ./
+RUN npm install
 
-COPY . .
-RUN OPENCLAW_A2UI_SKIP_MISSING=1 pnpm build
-# Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
-ENV OPENCLAW_PREFER_PNPM=1
-RUN pnpm ui:build
+# Copy backend source code
+COPY treasure-hunt-backend/ .
 
+# Build backend (TypeScript -> JavaScript)
+RUN npm run build
+
+# 5. Integrate Frontend
+# Copy built frontend assets to backend's public directory
+# The backend is configured to serve static files from 'public' if they exist
+COPY --from=frontend-builder /app/frontend/dist ./public
+
+# 6. Final Configuration
 ENV NODE_ENV=production
+ENV PORT=3000
+# Ensure Python path points to our venv
+ENV PYTHON_PATH="$VIRTUAL_ENV/bin/python3"
 
-# Allow non-root user to write temp files during runtime/tests.
-RUN chown -R node:node /app
+EXPOSE 3000
 
-# Security hardening: Run as non-root user
-# The node:22-bookworm image includes a 'node' user (uid 1000)
-# This reduces the attack surface by preventing container escape via root privileges
-USER node
-
-CMD ["node", "dist/index.js"]
+CMD ["npm", "start"]
