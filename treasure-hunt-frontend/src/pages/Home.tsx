@@ -7,7 +7,9 @@ const Home = () => {
   const { user } = useUserStore();
   const [treasures, setTreasures] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-
+  const [showJoinModal, setShowJoinModal] = useState(false);
+  const [joinCode, setJoinCode] = useState("");
+  
   useEffect(() => {
     // 1. Check for clipboard data on mount
     const checkClipboard = async () => {
@@ -85,6 +87,24 @@ const Home = () => {
       }
   };
 
+  // Handle manual code join
+  const handleJoinByCode = async () => {
+      if (!joinCode || joinCode.length !== 4) {
+          alert("Please enter a valid 4-digit code");
+          return;
+      }
+      
+      try {
+          const res = await api.post('/game/join-code', { code: joinCode });
+          if (res.treasureId) {
+              window.location.href = `/game/${res.treasureId}`;
+          }
+      } catch (err: any) {
+          console.error("Join failed:", err);
+          alert(err.response?.data?.error || "Failed to join via code. It may be expired.");
+      }
+  };
+
   if (loading) return <div className="p-4 text-center">Loading hunts...</div>;
 
   return (
@@ -93,16 +113,56 @@ const Home = () => {
         <h1 className="text-xl font-bold">Treasure Hunts</h1>
         <div className="flex items-center gap-3">
              <button 
+                onClick={() => setShowJoinModal(true)}
+                className="text-xs bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 py-1.5 rounded-full font-medium transition"
+             >
+                 🔑 Join Private
+             </button>
+             <button 
                 onClick={handlePasteLink}
                 className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-1.5 rounded-full font-medium transition"
              >
-                 📋 Paste Code
+                 📋 Paste
              </button>
              <div className="text-sm text-gray-600">
                 {user?.email}
              </div>
         </div>
       </header>
+
+      {/* Join Modal */}
+      {showJoinModal && (
+          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-xl p-6 w-full max-w-sm shadow-2xl">
+                  <h3 className="text-lg font-bold mb-4">Join Private Hunt</h3>
+                  <p className="text-sm text-gray-500 mb-4">Enter the 4-digit code shared by the creator.</p>
+                  
+                  <input 
+                      type="number" 
+                      value={joinCode}
+                      onChange={(e) => setJoinCode(e.target.value)}
+                      placeholder="0000"
+                      className="w-full text-center text-3xl font-mono tracking-widest border-2 border-gray-200 rounded-lg p-3 mb-6 focus:border-blue-500 outline-none"
+                      maxLength={4}
+                  />
+                  
+                  <div className="flex gap-3">
+                      <button 
+                          onClick={() => setShowJoinModal(false)}
+                          className="flex-1 py-3 text-gray-600 font-medium"
+                      >
+                          Cancel
+                      </button>
+                      <button 
+                          onClick={handleJoinByCode}
+                          className="flex-1 py-3 bg-blue-600 text-white rounded-lg font-bold shadow-lg hover:bg-blue-700"
+                      >
+                          Join
+                      </button>
+                  </div>
+              </div>
+          </div>
+      )}
 
       <div className="grid gap-4">
         {treasures.length === 0 ? (

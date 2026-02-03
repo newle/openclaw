@@ -59,6 +59,87 @@ function parseCoordinates(input: any): { lat: number, lng: number } | null {
     return null;
 }
 
+// Helper to generate a random 4-digit code
+function generateJoinCode(): string {
+  // 生成0-9999之间的随机整数
+  const num = Math.floor(Math.random() * 10000);
+  // 转换为字符串并确保是4位数，不足的前面补0
+  return num.toString().padStart(4, '0');
+}
+
+export const joinByCode = async (req: Request, res: Response) => {
+    try {
+        const { code } = req.body;
+        
+        if (!code || code.length !== 4) {
+            return res.status(400).json({ error: "Invalid code format" });
+        }
+
+        // Find treasure with this code
+        // Must be valid and not expired
+        const now = new Date().toISOString();
+        
+        const { data: treasure, error } = await supabase
+            .from("treasures")
+            .select("id")
+            .eq("join_code", code)
+            .gt("join_code_expires_at", now)
+            .single();
+
+        if (error || !treasure) {
+             return res.status(404).json({ error: "Code invalid or expired" });
+        }
+
+        res.json({ treasureId: treasure.id });
+
+    } catch (error: any) {
+        console.error("Join Code Error:", error);
+        res.status(500).json({ error: "Failed to join via code", details: error.message });
+    }
+};
+
+export const regenerateCode = async (req: Request, res: Response) => {
+    try {
+        const { treasureId, userId } = req.body;
+        
+        if (!treasureId || !userId) {
+             return res.status(400).json({ error: "Missing treasureId or userId" });
+        }
+
+        // Verify ownership
+        const { data: treasure } = await supabase
+            .from("treasures")
+            .select("creator_id")
+            .eq("id", treasureId)
+            .single();
+            
+        if (!treasure || treasure.creator_id !== userId) {
+            return res.status(403).json({ error: "Unauthorized" });
+        }
+
+        // Generate new code
+        const newCode = generateJoinCode();
+        // Expires in 5 minutes
+        const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+
+        const { error: updateError } = await supabase
+            .from("treasures")
+            .update({
+                join_code: newCode,
+                join_code_expires_at: expiresAt
+            })
+            .eq("id", treasureId);
+
+        if (updateError) throw updateError;
+
+        res.json({ joinCode: newCode, expiresAt });
+
+    } catch (error: any) {
+        console.error("Regenerate Code Error:", error);
+        res.status(500).json({ error: "Failed to regenerate code", details: error.message });
+    }
+};
+
 export const getTreasures = async (req: Request, res: Response) => {
   try {
     const userId = req.query.userId as string;
@@ -306,6 +387,15 @@ export const createTreasure = async (req: Request, res: Response) => {
         });
     }
 
+    // Generate Join Code if private
+    let joinCode = null;
+    let expiresAt = null;
+    
+    if (isPublic === false) {
+        joinCode = generateJoinCode();
+        expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString(); // 5 mins
+    }
+
     const { data: treasure, error: treasureError } = await supabase
       .from("treasures")
       .insert({
@@ -314,6 +404,8 @@ export const createTreasure = async (req: Request, res: Response) => {
         description,
         difficulty,
         is_public: isPublic !== undefined ? isPublic : false, // Default to false (private) if not specified
+        join_code: joinCode,
+        join_code_expires_at: expiresAt,
         // Use the first location as the center location for now
         center_location: `POINT(${locations[0].lng} ${locations[0].lat})`
       })
@@ -343,7 +435,12 @@ export const createTreasure = async (req: Request, res: Response) => {
 
     if (locationsError) throw locationsError;
 
-    res.status(201).json({ message: "Treasure created successfully", treasureId: treasure.id });
+    res.status(201).json({ 
+        message: "Treasure created successfully", 
+        treasureId: treasure.id,
+        joinCode: joinCode,
+        expiresAt: expiresAt
+    });
 
   } catch (error: any) {
     console.error("Create Treasure Error:", error);

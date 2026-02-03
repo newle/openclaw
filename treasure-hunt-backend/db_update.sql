@@ -22,4 +22,11 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'participations' AND column_name = 'is_completed') THEN
         ALTER TABLE participations ADD COLUMN is_completed BOOLEAN DEFAULT FALSE;
     END IF;
+
+    -- Add join_code columns if not exist
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'treasures' AND column_name = 'join_code') THEN
+        ALTER TABLE treasures ADD COLUMN join_code VARCHAR(4);
+        ALTER TABLE treasures ADD COLUMN join_code_expires_at TIMESTAMP WITH TIME ZONE;
+        CREATE INDEX idx_treasures_join_code ON treasures(join_code);
+    END IF;
 END $$;

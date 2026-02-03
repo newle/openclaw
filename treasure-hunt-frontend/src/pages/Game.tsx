@@ -109,6 +109,10 @@ const Game = () => {
   const [hasStarted, setHasStarted] = useState(false); // Track if game started
   const [isCompleted, setIsCompleted] = useState(false);
   const [finalResult, setFinalResult] = useState<any>(null);
+  const [treasureDetails, setTreasureDetails] = useState<any>(null);
+  const [showJoinCodeModal, setShowJoinCodeModal] = useState(false);
+  const [currentJoinCode, setCurrentJoinCode] = useState<string | null>(null);
+  const [joinCodeExpires, setJoinCodeExpires] = useState<string | null>(null);
 
   // Fetch locations and progress
   useEffect(() => {
@@ -118,10 +122,18 @@ const Game = () => {
             const treasures = await api.get('/game');
             const treasure = treasures.find((t: any) => t.id === id);
             
-            if (treasure && treasure.locations) {
+            if (treasure) {
                  const details = await api.get(`/game/${id}`);
-                 if (details && details.locations) {
-                     setLocations(details.locations.sort((a: any, b: any) => a.order_index - b.order_index));
+                 if (details) {
+                     setTreasureDetails(details);
+                     if (details.locations) {
+                         setLocations(details.locations.sort((a: any, b: any) => a.order_index - b.order_index));
+                     }
+                     // Set initial join code info if owner
+                     if (details.creator_id === user?.id && !details.is_public) {
+                         setCurrentJoinCode(details.join_code);
+                         setJoinCodeExpires(details.join_code_expires_at);
+                     }
                  }
             }
 
@@ -174,6 +186,23 @@ const Game = () => {
           alert("Failed to start game: " + e.message);
       }
   };
+
+  const handleRegenerateCode = async () => {
+      try {
+          const res = await api.post('/game/regenerate-code', { treasureId: id, userId: user?.id });
+          setCurrentJoinCode(res.joinCode);
+          setJoinCodeExpires(res.expiresAt);
+          alert(`New Code: ${res.joinCode}`);
+      } catch (e: any) {
+          alert("Failed to regenerate code: " + e.message);
+      }
+  };
+
+  // Check if code is expired
+  const isCodeExpired = React.useMemo(() => {
+      if (!joinCodeExpires) return true;
+      return new Date(joinCodeExpires) < new Date();
+  }, [joinCodeExpires]);
 
   // Auto-jump to first unverified location on load
   useEffect(() => {
@@ -473,12 +502,34 @@ const Game = () => {
              </button>
              
              {/* Share Button (Top Right) */}
-             <button 
-                onClick={handleShare}
-                className="absolute top-4 right-4 z-[1000] bg-black/50 px-3 py-2 rounded-full hover:bg-black/70 transition flex items-center gap-2 text-sm font-medium"
-             >
-                 📤 Share
-             </button>
+             <div className="absolute top-4 right-4 z-[1000] flex flex-col gap-2 items-end">
+                 <button 
+                    onClick={handleShare}
+                    className="bg-black/50 px-3 py-2 rounded-full hover:bg-black/70 transition flex items-center gap-2 text-sm font-medium"
+                 >
+                     📤 Share
+                 </button>
+                 
+                 {/* Join Code for Creator (if private) */}
+                 {treasureDetails?.creator_id === user?.id && !treasureDetails?.is_public && (
+                     <div className="bg-black/60 p-3 rounded-lg text-center backdrop-blur-sm">
+                         <span className="block text-[10px] text-gray-400 uppercase tracking-wider mb-1">Join Code</span>
+                         {currentJoinCode && !isCodeExpired ? (
+                             <div className="text-2xl font-mono font-bold text-green-400 tracking-widest">
+                                 {currentJoinCode}
+                             </div>
+                         ) : (
+                             <div className="text-sm text-red-400 font-bold">Expired</div>
+                         )}
+                         <button 
+                             onClick={handleRegenerateCode}
+                             className="mt-2 text-[10px] bg-white/10 hover:bg-white/20 px-2 py-1 rounded w-full"
+                         >
+                             🔄 Regenerate (5m)
+                         </button>
+                     </div>
+                 )}
+             </div>
              
              <div className="flex-1 relative z-10">
                  <MapContainer 

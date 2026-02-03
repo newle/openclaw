@@ -50,6 +50,8 @@ const Create = () => {
     setFormData({ title: '', description: '', difficulty: 3 });
   };
 
+  const [createdCode, setCreatedCode] = useState<{code: string, expires: string} | null>(null);
+
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
     
@@ -194,9 +196,15 @@ const Create = () => {
         });
         
         console.log("Create success:", response);
-        alert("Treasure Hunt Created Successfully!");
-        clearCache(); // Clear cache on success
-        navigate('/');
+
+        if (!isPublic && response.joinCode) {
+            setCreatedCode({ code: response.joinCode, expires: response.expiresAt });
+            clearCache();
+        } else {
+            alert("Treasure Hunt Created Successfully!");
+            clearCache(); // Clear cache on success
+            navigate('/');
+        }
     } catch (error: any) {
         console.error("Create failed:", error);
         alert("Failed to create treasure: " + error.message);
@@ -205,8 +213,35 @@ const Create = () => {
     }
   };
 
+  if (createdCode) {
+      return (
+          <div className="min-h-screen bg-gray-900 text-white p-6 flex flex-col items-center justify-center">
+              <div className="bg-gray-800 p-8 rounded-2xl w-full max-w-md text-center shadow-xl border border-gray-700">
+                  <div className="w-16 h-16 bg-green-500/20 text-green-500 rounded-full flex items-center justify-center mx-auto mb-6">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  </div>
+                  <h2 className="text-2xl font-bold mb-2">Treasure Created!</h2>
+                  <p className="text-gray-400 mb-6">This is a private hunt. Share this code with your friends to let them join.</p>
+                  
+                  <div className="bg-black/50 p-6 rounded-xl mb-6">
+                      <div className="text-sm text-gray-500 uppercase tracking-widest mb-2">Join Code</div>
+                      <div className="text-5xl font-mono font-bold text-white tracking-[0.2em]">{createdCode.code}</div>
+                      <div className="text-xs text-yellow-500 mt-2">Expires in 5 minutes</div>
+                  </div>
+                  
+                  <button 
+                      onClick={() => navigate('/')}
+                      className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg transition"
+                  >
+                      Done
+                  </button>
+              </div>
+          </div>
+      );
+  }
+
   return (
-    <div className="min-h-screen bg-gray-50 p-4 pb-20">
+    <div className="min-h-screen bg-gray-900 text-white p-4 pb-20">
       <h1 className="text-2xl font-bold mb-6">Create New Hunt</h1>
       <form onSubmit={handleSubmit} className="bg-white p-6 rounded-lg shadow space-y-4">
         <div>
