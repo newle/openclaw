@@ -5,28 +5,40 @@ import { api } from '../lib/api';
 
 const Home = () => {
   const { user } = useUserStore();
-  const [treasures, setTreasures] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'participated' | 'created' | 'public'>('participated');
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [joinCode, setJoinCode] = useState("");
   
+  const [cache, setCache] = useState<Record<string, any[]>>({});
+  const [loading, setLoading] = useState(false); // Only for initial fetch of a tab
+  
+  const treasures = cache[activeTab] || [];
+  const hasCache = !!cache[activeTab];
+
   useEffect(() => {
     // 1. Check for clipboard data on mount (skipped)
     
     // 2. Load list based on activeTab
     const fetchTreasures = async () => {
-      setLoading(true);
+      // Only show spinner if no data for this tab
+      if (!hasCache) setLoading(true);
+      
+      const currentTab = activeTab; // Capture current tab to avoid race conditions
+      
       try {
         // Ensure we don't send 'undefined' string
         const userIdParam = user?.id ? user.id : '';
         // Pass filter param
-        const data = await api.get(`/game?userId=${userIdParam}&filter=${activeTab}`);
-        setTreasures(data);
+        const data = await api.get(`/game?userId=${userIdParam}&filter=${currentTab}`);
+        
+        // Update cache for this tab
+        setCache(prev => ({ ...prev, [currentTab]: data }));
       } catch (err) {
         console.error("Failed to fetch treasures:", err);
       } finally {
-        setLoading(false);
+        if (currentTab === activeTab) {
+             setLoading(false);
+        }
       }
     };
 
@@ -41,7 +53,7 @@ const Home = () => {
       }
       
       try {
-          const res = await api.post('/game/join-code', { code: joinCode });
+          const res = await api.post('/game/join-code', { code: joinCode, userId: user?.id });
           if (res.treasureId) {
               window.location.href = `/game/${res.treasureId}`;
           }
@@ -49,6 +61,36 @@ const Home = () => {
           console.error("Join failed:", err);
           alert(err.response?.data?.error || "Failed to join via code. It may be expired.");
       }
+  };
+
+  const [generatingCode, setGeneratingCode] = useState(false);
+
+  const handleRegenerateCode = async (treasureId: string) => {
+      setGeneratingCode(true);
+      try {
+          const res = await api.post('/game/regenerate-code', { treasureId, userId: user?.id });
+          if (res.joinCode) {
+              alert(`New Join Code: ${res.joinCode}\nExpires in 5 minutes.`);
+              // Ideally update local state to reflect new code if we were storing it
+              // But since we are in a list, we just alert.
+              // Re-fetching list might update it if we display it.
+              
+              // Refetch to update UI state (active/inactive code)
+              const userIdParam = user?.id ? user.id : '';
+              const data = await api.get(`/game?userId=${userIdParam}&filter=${activeTab}`);
+              setCache(prev => ({ ...prev, [activeTab]: data }));
+          }
+      } catch (err: any) {
+          alert("Failed to generate code: " + err.message);
+      } finally {
+          setGeneratingCode(false);
+      }
+  };
+
+  // Helper to check if code is valid
+  const isCodeActive = (t: any) => {
+      if (!t.join_code || !t.join_code_expires_at) return false;
+      return new Date(t.join_code_expires_at) > new Date();
   };
 
   if (loading && treasures.length === 0) return <div className="p-4 text-center">Loading hunts...</div>;
@@ -148,18 +190,50 @@ const Home = () => {
                   <div className="flex justify-between items-start">
                       <div>
                         <h3 className="text-lg font-semibold">{t.title}</h3>
-                        <div className="flex gap-2 mt-1 text-xs text-gray-500">
+                        <div className="flex gap-2 mt-1 text-xs text-gray-500 flex-wrap">
                             <span className="bg-gray-100 px-2 py-0.5 rounded">{'⭐'.repeat(t.difficulty)}</span>
                             <span className="bg-gray-100 px-2 py-0.5 rounded">{t.locations?.count || 0} Locs</span>
+                            <span className="bg-gray-100 px-2 py-0.5 rounded flex items-center gap-1">
+                                👤 {t.creator?.nickname || 'Unknown'}
+                            </span>
                             {t.is_public === false && <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded">🔒 Private</span>}
                         </div>
                       </div>
-                      {t.participation?.is_completed && (
-                          <div className="text-right">
-                              <span className="block text-xs text-green-600 font-bold uppercase tracking-wider">Completed</span>
-                              <span className="text-lg font-mono font-bold text-green-700">{t.participation.final_cost}s</span>
+                          <div className="text-right flex flex-col items-end gap-1">
+                              {t.participation?.is_completed && (
+                                  <>
+                                      <span className="block text-xs text-green-600 font-bold uppercase tracking-wider">Completed</span>
+                                      <span className="text-lg font-mono font-bold text-green-700">{t.participation.final_cost}s</span>
+                                  </>
+                              )}
+                              
+                              {/* Join Code Display (Creator & Participants) */}
+                              {!t.is_public && (
+                                  <div className="mt-1" onClick={(e) => e.preventDefault()}>
+                                      {isCodeActive(t) ? (
+                                          <div className="group relative">
+                                              <span className="text-xs bg-purple-100 text-purple-700 px-2 py-1 rounded font-mono cursor-pointer border border-purple-200">
+                                                  Code: {t.join_code}
+                                              </span>
+                                              <div className="absolute right-0 top-full mt-1 bg-gray-800 text-white text-[10px] p-1 rounded opacity-0 group-hover:opacity-100 transition pointer-events-none whitespace-nowrap z-10">
+                                                  Expires: {new Date(t.join_code_expires_at).toLocaleTimeString()}
+                                              </div>
+                                          </div>
+                                      ) : (
+                                          /* Only Creator can generate new code */
+                                          t.creator_id === user?.id && (
+                                              <button 
+                                                  onClick={() => handleRegenerateCode(t.id)}
+                                                  disabled={generatingCode}
+                                                  className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 px-2 py-1 rounded border border-gray-300 transition flex items-center gap-1"
+                                              >
+                                                  {generatingCode ? '...' : 'Generate Code'}
+                                              </button>
+                                          )
+                                      )}
+                                  </div>
+                              )}
                           </div>
-                      )}
                   </div>
                   <p className="text-xs text-gray-400 mt-2 line-clamp-2">{t.description}</p>
                 </Link>
