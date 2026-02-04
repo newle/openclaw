@@ -76,6 +76,7 @@ const Game = () => {
   
   const [loading, setLoading] = useState(true);
   const [verifying, setVerifying] = useState(false);
+  const [processingPhoto, setProcessingPhoto] = useState(false); // New state for photo processing
   const [photo, setPhoto] = useState<string | null>(null);
   const [photoData, setPhotoData] = useState<string | null>(null);
   const [result, setResult] = useState<any>(null);
@@ -115,22 +116,19 @@ const Game = () => {
   useEffect(() => {
       const fetchGameData = async () => {
           try {
-            // 1. Get Game Details
-            const treasures = await api.get('/game');
-            const treasure = treasures.find((t: any) => t.id === id);
+            // 1. Get Game Details directly
+            // Pass userId to ensure we get locations if we have access (Creator or Joined)
+            const details = await api.get(`/game/${id}?userId=${user?.id}`);
             
-            if (treasure) {
-                 const details = await api.get(`/game/${id}`);
-                 if (details) {
-                     setTreasureDetails(details);
-                     if (details.locations) {
-                         setLocations(details.locations.sort((a: any, b: any) => a.order_index - b.order_index));
-                     }
-                     // Set initial join code info if owner
-                     if (details.creator_id === user?.id && !details.is_public) {
-                         setCurrentJoinCode(details.join_code);
-                         setJoinCodeExpires(details.join_code_expires_at);
-                     }
+            if (details) {
+                 setTreasureDetails(details);
+                 if (details.locations) {
+                     setLocations(details.locations.sort((a: any, b: any) => a.order_index - b.order_index));
+                 }
+                 // Set initial join code info if owner
+                 if (details.creator_id === user?.id && !details.is_public) {
+                     setCurrentJoinCode(details.join_code);
+                     setJoinCodeExpires(details.join_code_expires_at);
                  }
             }
 
@@ -373,29 +371,35 @@ const Game = () => {
 
   // Compression helper
   const compressImage = (file: File, quality: number = 0.7, maxWidth: number = 1200): Promise<string> => {
-      return new Promise((resolve) => {
+      return new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.readAsDataURL(file);
           reader.onload = (event) => {
               const img = new Image();
               img.src = event.target?.result as string;
               img.onload = () => {
-                  const canvas = document.createElement('canvas');
-                  let width = img.width;
-                  let height = img.height;
-                  
-                  if (width > maxWidth) {
-                      height = Math.round((height * maxWidth) / width);
-                      width = maxWidth;
+                  try {
+                      const canvas = document.createElement('canvas');
+                      let width = img.width;
+                      let height = img.height;
+                      
+                      if (width > maxWidth) {
+                          height = Math.round((height * maxWidth) / width);
+                          width = maxWidth;
+                      }
+                      
+                      canvas.width = width;
+                      canvas.height = height;
+                      const ctx = canvas.getContext('2d');
+                      ctx?.drawImage(img, 0, 0, width, height);
+                      resolve(canvas.toDataURL('image/jpeg', quality));
+                  } catch (e) {
+                      reject(e);
                   }
-                  
-                  canvas.width = width;
-                  canvas.height = height;
-                  const ctx = canvas.getContext('2d');
-                  ctx?.drawImage(img, 0, 0, width, height);
-                  resolve(canvas.toDataURL('image/jpeg', quality));
               };
+              img.onerror = (e) => reject(new Error("Failed to load image"));
           };
+          reader.onerror = (e) => reject(new Error("Failed to read file"));
       });
   };
 
@@ -412,6 +416,7 @@ const Game = () => {
       const previewUrl = URL.createObjectURL(file);
       setPhoto(previewUrl);
       setResult(null); 
+      setProcessingPhoto(true); // Start processing
       
       try {
           // Compress immediately to ensure it fits in localStorage and is fast
@@ -432,13 +437,36 @@ const Game = () => {
                console.log("Backup saved successfully");
            } catch (err) {
                console.warn("Storage full, cannot backup photo", err);
-               alert("Storage full. Photo might be lost on reload.");
+               // alert("Storage full. Photo might be lost on reload.");
            }
            
            // Get geolocation after image is safe
            requestLocation();
       } catch (err) {
-          console.error("Image processing failed", err);
+          console.error("Image compression failed, falling back to original", err);
+          
+          // Fallback: Read original file as Base64
+          try {
+              const originalData = await new Promise<string>((resolve, reject) => {
+                  const reader = new FileReader();
+                  reader.readAsDataURL(file);
+                  reader.onload = () => resolve(reader.result as string);
+                  reader.onerror = reject;
+              });
+              
+              setPhotoData(originalData);
+              // setPhoto is already set to previewUrl, which is fine, or we can update it to data url
+              // Keeping previewUrl is faster usually, but data url is consistent.
+              // Let's keep previewUrl for display if valid, but update photoData for upload.
+              
+              requestLocation();
+          } catch (readErr) {
+              console.error("Failed to read original file", readErr);
+              alert("Failed to process image. Please try again.");
+              setPhoto(null);
+          }
+      } finally {
+          setProcessingPhoto(false); // End processing
       }
     }
   };
@@ -619,7 +647,82 @@ const Game = () => {
   };
 
   if (loading) return <div className="flex h-screen items-center justify-center text-white bg-gray-900">Loading...</div>;
-  if (!currentTarget) return <div className="flex h-screen items-center justify-center text-white bg-gray-900">No locations found.</div>;
+
+  // Handle Private Treasure Joining
+  // If no locations are found, it might be because the user hasn't joined this private treasure yet
+  // OR the treasure is truly empty.
+  // We need to differentiate.
+  // We can check if treasureDetails exists but locations is empty.
+  // But wait, getTreasureDetail backend returns locations: [] if user not authorized? 
+  // No, backend returns 403 or empty list?
+  // Let's check backend logic: getTreasureDetail -> if private & not creator & not joined -> returns { ...treasure, locations: [] } ?
+  // Actually backend getTreasureDetail usually returns everything if public or joined.
+  
+  // If we are here and locations is empty, show Join Code input if it's private and we are not joined.
+  const isPrivateAndNotJoined = treasureDetails && !treasureDetails.is_public && treasureDetails.creator_id !== user?.id && !hasStarted && locations.length === 0;
+
+  if (isPrivateAndNotJoined) {
+      return (
+        <div className="flex flex-col h-screen bg-gray-900 text-white items-center justify-center p-6">
+            <div className="max-w-md w-full bg-gray-800 p-8 rounded-2xl shadow-xl text-center relative">
+                <button onClick={() => navigate('/')} className="absolute top-4 left-4 text-gray-400 hover:text-white">
+                    <ArrowLeft size={24} />
+                </button>
+
+                <div className="mb-6 bg-gray-700 w-16 h-16 rounded-full flex items-center justify-center mx-auto mt-8">
+                    <MapIcon size={32} className="text-gray-400" />
+                </div>
+                <h2 className="text-2xl font-bold mb-2">Private Treasure Hunt</h2>
+                <p className="text-gray-400 mb-6">Enter the join code to access this hunt.</p>
+                
+                {/* Join Code Display for Testing/Demo (Optional) - In real app, user gets code from creator */}
+                {/* 
+                <div className="mb-4 text-xs text-gray-500">
+                    (Hint: Ask the creator for the code)
+                </div> 
+                */}
+
+                <input 
+                    type="text" 
+                    placeholder="Enter Code (e.g. 123456)"
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-center text-xl font-mono tracking-widest mb-4 focus:ring-2 focus:ring-green-500 outline-none uppercase"
+                    maxLength={6}
+                    onKeyDown={async (e) => {
+                        if (e.key === 'Enter') {
+                            const code = e.currentTarget.value;
+                            try {
+                                await api.post('/game/join-code', { code, userId: user?.id });
+                                window.location.reload();
+                            } catch (err: any) {
+                                alert(err.message);
+                            }
+                        }
+                    }}
+                />
+                <button 
+                    onClick={async (e) => {
+                        const input = e.currentTarget.previousElementSibling as HTMLInputElement;
+                        const code = input.value;
+                         try {
+                            await api.post('/game/join-code', { code, userId: user?.id });
+                            window.location.reload();
+                        } catch (err: any) {
+                            alert(err.message);
+                        }
+                    }}
+                    className="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-3 rounded-lg transition"
+                >
+                    Join Hunt
+                </button>
+            </div>
+        </div>
+      );
+  }
+
+  if (!currentTarget && locations.length === 0) return <div className="flex h-screen items-center justify-center text-white bg-gray-900 flex-col gap-4">
+      <p>No locations found in this treasure hunt.</p>
+      <button onClick={() => navigate('/')} className="text-blue-400 underline">Back to Home</button>
+  </div>;
 
   // Render Final Result Screen if Completed
   if (isCompleted && finalResult) {
@@ -1197,13 +1300,18 @@ const Game = () => {
                     {photo ? (
                         <button 
                             onClick={() => handleVerify(false)}
-                            disabled={verifying}
+                            disabled={verifying || processingPhoto}
                             className="w-full max-w-xs bg-green-600 text-white font-bold text-lg px-8 py-4 rounded-full disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:bg-green-500 transition"
                         >
                             {verifying ? (
                                 <span className="flex items-center justify-center gap-2">
                                     <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
                                     Verifying...
+                                </span>
+                            ) : processingPhoto ? (
+                                <span className="flex items-center justify-center gap-2">
+                                    <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+                                    Processing...
                                 </span>
                             ) : 'Verify'}
                         </button>
