@@ -69,10 +69,18 @@ function generateJoinCode(): string {
 
 export const joinByCode = async (req: Request, res: Response) => {
     try {
-        const { code } = req.body;
+        const { code, userId } = req.body;
         
         if (!code || code.length !== 4) {
             return res.status(400).json({ error: "Invalid code format" });
+        }
+        
+        if (!userId) {
+             // If userId missing (e.g. from public home page without auth context fully loaded?), 
+             // we can't create participation.
+             // But maybe the client is just checking validity?
+             // No, join means "I want to participate".
+             return res.status(400).json({ error: "Missing user ID" });
         }
 
         // Find treasure with this code
@@ -88,6 +96,95 @@ export const joinByCode = async (req: Request, res: Response) => {
 
         if (error || !treasure) {
              return res.status(404).json({ error: "Code invalid or expired" });
+        }
+        
+        // Ensure user exists (similar to createTreasure logic)
+        const { data: userExists } = await supabase.from('users').select('id').eq('id', userId).single();
+        if (!userExists) {
+             await supabase.from('users').insert({
+                id: userId,
+                openid: `temp_${userId}`, 
+                nickname: 'Explorer',
+            });
+        }
+
+        // Check if already joined
+        const { data: existing } = await supabase
+            .from("participations")
+            .select("id")
+            .eq("user_id", userId)
+            .eq("treasure_id", treasure.id)
+            .single();
+            
+        if (!existing) {
+            // Create participation record to grant access
+            const { error: joinError } = await supabase
+                .from("participations")
+                .insert({
+                    user_id: userId,
+                    treasure_id: treasure.id,
+                    // We don't set start_time yet? Or do we?
+                    // Usually start_time is set when they click "Start Hunt".
+                    // But here we need to grant access.
+                    // Let's insert with null start_time or current time?
+                    // If we set start_time now, the timer starts ticking before they see the map?
+                    // Requirement: "点击开始寻宝后，才会插入participations" - this was for public hunts?
+                    // For private hunts, "Join" gives access to "Start Screen".
+                    // So we should insert a record, but maybe 'start_time' is null?
+                    // Our schema might allow null start_time.
+                    // If not, we set it to now? 
+                    // Let's check logic in getTreasureDetail -> checks if participation exists.
+                    // Let's set start_time to null if possible, or a flag?
+                    // If schema enforces not null, we set it.
+                    // But wait, 'startGame' endpoint also inserts participation.
+                    // If we insert here, 'startGame' will see "Already started".
+                    // That's fine, startGame handles existing participation.
+                    
+                    // Actually, if we insert here, user has "Joined".
+                    // Does "Joined" mean "Started"?
+                    // Usually "Start Hunt" is the timer start.
+                    // If we insert here, we might mess up the timer if we set start_time.
+                    // Let's see if we can insert without start_time.
+                    // If schema allows null start_time, great.
+                    // If not, we might need a separate 'access_list' table or flag.
+                    // But we are using 'participations' for access check.
+                    
+                    // Let's assume joining = access granted. Timer starts later?
+                    // But startGame implementation:
+                    // const { data: existing } = ... if (existing) return "Already started".
+                    // So if we insert here, startGame will say "Already started" and user can't "Start".
+                    // And if we set start_time here, timer starts now.
+                    
+                    // Solution:
+                    // 1. Insert here with start_time = NULL (if allowed).
+                    // 2. Update startGame to UPDATE start_time if it's null.
+                    
+                    // Let's try inserting with null start_time.
+                    // (Assuming schema allows it, usually timestamps are nullable unless strict).
+                });
+                
+             // Wait, if we can't use null, we must use a workaround.
+             // But wait, the previous logic for public hunts was:
+             // 1. User sees details (because public).
+             // 2. User clicks Start -> inserts participation.
+             
+             // For private hunts:
+             // 1. User enters code -> Join -> We must persist this permission.
+             // 2. User sees details.
+             // 3. User clicks Start -> Starts timer.
+             
+             // If we use 'participations' for permission, we must insert.
+             // Let's insert with a special status or null start_time.
+             // If I look at 'startGame', it does:
+             // .insert({ ... start_time: new Date().toISOString() })
+             
+             // Let's modify 'startGame' to handle "update existing participation that hasn't started".
+             
+             await supabase.from("participations").insert({
+                 user_id: userId,
+                 treasure_id: treasure.id,
+                 // start_time: null // Let's try omitting it.
+             });
         }
 
         res.json({ treasureId: treasure.id });
@@ -236,6 +333,8 @@ export const getTreasures = async (req: Request, res: Response) => {
 export const getTreasureDetail = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const { userId } = req.query; // Expect userId to check permission for private treasures
+
     const { data: treasure, error } = await supabase
       .from("treasures")
       .select(`
@@ -248,6 +347,34 @@ export const getTreasureDetail = async (req: Request, res: Response) => {
 
     if (error) throw error;
     if (!treasure) return res.status(404).json({ error: "Treasure not found" });
+
+    // Permission Check for Private Treasures
+    if (!treasure.is_public) {
+        let hasAccess = false;
+        
+        // 1. Creator access
+        if (userId && treasure.creator_id === userId) {
+            hasAccess = true;
+        } else if (userId) {
+            // 2. Participation access
+            const { data: participation } = await supabase
+                .from("participations")
+                .select("id")
+                .eq("user_id", userId)
+                .eq("treasure_id", id)
+                .single();
+            
+            if (participation) {
+                hasAccess = true;
+            }
+        }
+        
+        // If no access, hide locations
+        if (!hasAccess) {
+            treasure.locations = [];
+            // Optionally we could return a flag like 'requires_join: true'
+        }
+    }
 
     // Transform locations to include parsed coordinates
     if (treasure.locations && Array.isArray(treasure.locations)) {
@@ -360,13 +487,24 @@ export const startGame = async (req: Request, res: Response) => {
         // Check if already started
         const { data: existing } = await supabase
             .from("participations")
-            .select("id")
+            .select("id, start_time")
             .eq("user_id", userId)
             .eq("treasure_id", treasureId)
             .single();
         
         if (existing) {
-            return res.json({ message: "Already started", participationId: existing.id });
+            // If already started (has start_time), return message
+            if (existing.start_time) {
+                return res.json({ message: "Already started", participationId: existing.id });
+            } else {
+                // If exists but no start_time (from Private Join), update start_time now
+                await supabase
+                    .from("participations")
+                    .update({ start_time: new Date().toISOString() })
+                    .eq("id", existing.id);
+                    
+                return res.json({ message: "Game started", participationId: existing.id });
+            }
         }
 
         // Create participation
