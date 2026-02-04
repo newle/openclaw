@@ -129,7 +129,25 @@ export class ImageService {
       const imageScore = (histogramScore * 0.1) + (dinov2Score * 0.9);
 
       // Threshold
-      const isMatch = gpsMatch && imageScore >= 0.60; // 60% threshold as per PRD
+      // Policy:
+      // - If GPS is present and matches (<= 20m): Image score must be >= 0.60
+      // - If GPS is missing (or > 20m): Image score must be >= 0.80 (Stricter visual check)
+      
+      let isMatch = false;
+      // CRITICAL: Treat (0,0) as invalid GPS for verification purposes
+      const isRefValid = refLoc && (refLoc.latitude !== 0 || refLoc.longitude !== 0);
+      const isCandValid = candLoc && (candLoc.latitude !== 0 || candLoc.longitude !== 0);
+      const hasGpsData = isRefValid && isCandValid;
+
+      if (hasGpsData && gpsMatch) {
+          // Case 1: GPS Match + Visual Match (Normal threshold)
+          isMatch = imageScore >= 0.60;
+      } else {
+          // Case 2: No GPS or GPS Mismatch -> Require high visual similarity
+          // If GPS mismatch (distance > 20m), usually we should fail, but for now treating as "fallback"
+          // If GPS is missing, we rely solely on high visual match.
+          isMatch = imageScore >= 0.80;
+      }
 
       const ret = {
         isMatch,

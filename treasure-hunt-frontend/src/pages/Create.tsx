@@ -56,115 +56,123 @@ const Create = () => {
     if (!e.target.files || e.target.files.length === 0) return;
     
     setUploading(true);
-    const originalFile = e.target.files[0];
-
-    try {
-      // 1. Extract GPS from original file BEFORE compression (compression strips metadata)
-      let lat = 0;
-      let lng = 0;
-      try {
-        const gpsData = await exifr.gps(originalFile);
-        if (gpsData) {
-          lat = gpsData.latitude;
-          lng = gpsData.longitude;
-        } else {
-            console.warn("No GPS data found in image, using fallback/current location");
-            // Fallback to browser geolocation if image has no GPS
-            await new Promise<void>((resolve, reject) => {
-                navigator.geolocation.getCurrentPosition(
-                    (pos) => {
-                        lat = pos.coords.latitude;
-                        lng = pos.coords.longitude;
-                        resolve();
-                    },
-                    (err) => {
-                        console.error("Geolocation failed:", err);
-                        // If both fail, maybe alert user? For now let's keep 0,0 or random mock
-                        // Using previous random mock as last resort for demo
-                        lat = 31.2304 + (Math.random() - 0.5) * 0.01;
-                        lng = 121.4737 + (Math.random() - 0.5) * 0.01;
-                        resolve();
-                    }
-                );
-            });
-        }
-      } catch (e) {
-        console.error("Error reading EXIF:", e);
-      }
-
-      // 2. Compress Image
-      const options = {
-        maxSizeMB: 0.5,           // Compress to ~500KB
-        maxWidthOrHeight: 1920, // Resize to max 1920px
-        useWebWorker: true,
-        fileType: 'image/jpeg'  // Convert to JPEG
-      };
-      
-      console.log('Starting processing...');
-      let fileToUpload = originalFile;
-
-      // Only attempt client-side compression for non-HEIC images
-      // For HEIC, we send original file to backend
-      const isHeic = originalFile.name.toLowerCase().endsWith('.heic') || 
-                     originalFile.type === 'image/heic' ||
-                     originalFile.type === 'image/heif';
-
-      if (!isHeic) {
+    const files = Array.from(e.target.files);
+    
+    // Process files sequentially to avoid overwhelming browser/server
+    for (const originalFile of files) {
         try {
-            console.log('Compressing standard image...');
-            const compressedFile = await imageCompression(originalFile, options);
-            // Ensure we send a File object with a name, and force .jpg extension
-            const newFileName = originalFile.name.replace(/\.[^/.]+$/, "") + ".jpg";
-            fileToUpload = new File([compressedFile], newFileName, { type: 'image/jpeg' });
-        } catch (err) {
-            console.warn('Client-side compression failed, uploading original:', err);
+            console.log(`Processing file: ${originalFile.name}`);
+            
+            // 1. Extract GPS from original file BEFORE compression (compression strips metadata)
+            let lat = 0;
+            let lng = 0;
+            try {
+                const gpsData = await exifr.gps(originalFile);
+                if (gpsData) {
+                    lat = gpsData.latitude;
+                    lng = gpsData.longitude;
+                } else {
+                    console.warn("No GPS data found in image, using fallback/current location");
+                    // Fallback to browser geolocation if image has no GPS
+                    // We'll ask for location once per batch if needed, but for simplicity here we do it per file if missing
+                    // Or reuse last known?
+                    
+                    // Simple promise for geolocation
+                    try {
+                        await new Promise<void>((resolve, reject) => {
+                            navigator.geolocation.getCurrentPosition(
+                                (pos) => {
+                                    lat = pos.coords.latitude;
+                                    lng = pos.coords.longitude;
+                                    resolve();
+                                },
+                                (err) => {
+                                    console.error("Geolocation failed:", err);
+                                    // Random jitter if completely failed (mock behavior)
+                                    lat = 31.2304 + (Math.random() - 0.5) * 0.01;
+                                    lng = 121.4737 + (Math.random() - 0.5) * 0.01;
+                                    resolve();
+                                }
+                            );
+                        });
+                    } catch (e) { /* ignore */ }
+                }
+            } catch (e) {
+                console.error("Error reading EXIF:", e);
+            }
+
+            // 2. Compress Image
+            const options = {
+                maxSizeMB: 0.5,           // Compress to ~500KB
+                maxWidthOrHeight: 1200, // Resize to max 1200px
+                useWebWorker: true,
+                fileType: 'image/jpeg',  // Convert to JPEG
+                initialQuality: 0.7      // Explicit quality setting
+            };
+            
+            let fileToUpload = originalFile;
+
+            // Only attempt client-side compression for non-HEIC images
+            const isHeic = originalFile.name.toLowerCase().endsWith('.heic') || 
+                           originalFile.type === 'image/heic' ||
+                           originalFile.type === 'image/heif';
+
+            if (!isHeic) {
+                try {
+                    // Add timeout race for compression
+                    const compressionPromise = imageCompression(originalFile, options);
+                    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Compression timeout")), 10000));
+                    
+                    const compressedFile = await Promise.race([compressionPromise, timeoutPromise]) as File;
+                    
+                    // Ensure we send a File object with a name, and force .jpg extension
+                    const newFileName = originalFile.name.replace(/\.[^/.]+$/, "") + ".jpg";
+                    fileToUpload = new File([compressedFile], newFileName, { type: 'image/jpeg' });
+                } catch (err) {
+                    console.warn('Client-side compression failed or timed out, uploading original:', err);
+                    fileToUpload = originalFile;
+                }
+            }
+            
+            // 3. Upload File
+            const uploadData = new FormData();
+            uploadData.append('file', fileToUpload);
+            
+            if (isHeic) {
+                uploadData.append('convert', 'true');
+            }
+            
+            const { url, lat: serverLat, lng: serverLng, message } = await api.upload('/upload', uploadData);
+            
+            // Check for duplicates in current list (by URL)
+            // Note: Since we upload fresh each time, URL might be different if filename includes timestamp/hash
+            // But if logic uses content hash, it might be same.
+            // Let's just proceed.
+            
+            if (message) console.log(message);
+
+            // Use server GPS if available (priority), otherwise fallback to local parsing
+            const finalLat = (serverLat && serverLat !== 0) ? serverLat : lat;
+            const finalLng = (serverLng && serverLng !== 0) ? serverLng : lng;
+
+            // 4. Add to locations state (using functional update to ensure we don't lose previous ones in the loop)
+            setLocations(prev => [...prev, {
+                description: '',
+                hint: '',
+                photoUrl: url, 
+                lat: finalLat,
+                lng: finalLng
+            }]);
+
+        } catch (error: any) {
+            console.error(`Error processing file ${originalFile.name}:`, error);
+            alert(`Error processing ${originalFile.name}: ${error.message}`);
         }
-      } else {
-          console.log('HEIC detected, skipping client-side compression, uploading raw file...');
-      }
-      
-      // 3. Upload File
-      const uploadData = new FormData();
-      uploadData.append('file', fileToUpload);
-      
-      // Pass a flag to tell backend to convert if needed (though backend can detect too)
-      if (isHeic) {
-          uploadData.append('convert', 'true');
-      }
-      
-      const { url, lat: serverLat, lng: serverLng, message } = await api.upload('/upload', uploadData);
-      
-      // Check for duplicates in current list
-      if (locations.some(loc => loc.photoUrl === url)) {
-          alert("This image has already been added to the current hunt.");
-          return;
-      }
-
-      if (message) {
-          alert(message);
-      }
-
-      // Use server GPS if available (priority), otherwise fallback to local parsing if we had it (though backend is more reliable)
-      const finalLat = (serverLat && serverLat !== 0) ? serverLat : lat;
-      const finalLng = (serverLng && serverLng !== 0) ? serverLng : lng;
-
-      // 4. Add to locations
-      setLocations([...locations, {
-        description: '',
-        hint: '',
-        photoUrl: url, 
-        lat: finalLat,
-        lng: finalLng
-      }]);
-
-    } catch (error: any) {
-      console.error(error);
-      alert('Error processing image: ' + error.message);
-    } finally {
-      setUploading(false);
-      // Reset input
-      e.target.value = '';
     }
+
+    setUploading(false);
+    // Reset input
+    e.target.value = '';
   };
 
   const updateLocation = (index: number, field: keyof LocationItem, value: string) => {
@@ -241,14 +249,14 @@ const Create = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white p-4 pb-20">
+    <div className="min-h-screen bg-gray-50 text-gray-900 p-4 pb-20">
       <h1 className="text-2xl font-bold mb-6">Create New Hunt</h1>
       <form onSubmit={handleSubmit} className="bg-white p-6 rounded-lg shadow space-y-4">
         <div>
           <label className="block text-sm font-medium text-gray-700">Title</label>
           <input
             type="text"
-            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border"
+            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border text-gray-900"
             value={formData.title}
             onChange={(e) => setFormData({ ...formData, title: e.target.value })}
             required
@@ -257,7 +265,7 @@ const Create = () => {
         <div>
           <label className="block text-sm font-medium text-gray-700">Description</label>
           <textarea
-            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border"
+            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border text-gray-900"
             rows={3}
             value={formData.description}
             onChange={(e) => setFormData({ ...formData, description: e.target.value })}
@@ -269,7 +277,7 @@ const Create = () => {
             type="number"
             min="1"
             max="5"
-            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border"
+            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm p-2 border text-gray-900"
             value={formData.difficulty}
             onChange={(e) => setFormData({ ...formData, difficulty: parseInt(e.target.value) })}
             required
@@ -291,7 +299,7 @@ const Create = () => {
         </div>
 
         <div className="border-t pt-4">
-          <h3 className="font-medium mb-4">Locations ({locations.length})</h3>
+          <h3 className="font-medium mb-4 text-gray-900">Locations ({locations.length})</h3>
           
           <div className="space-y-4 mb-4">
             {locations.map((loc, idx) => (
@@ -308,13 +316,13 @@ const Create = () => {
                     <div className="flex-1 space-y-2">
                         <input 
                             placeholder="Description (e.g. Bronze Lion)"
-                            className="w-full text-sm border rounded p-1"
+                            className="w-full text-sm border rounded p-1 text-gray-900"
                             value={loc.description}
                             onChange={(e) => updateLocation(idx, 'description', e.target.value)}
                         />
                         <input 
                             placeholder="Hint (e.g. Near the gate)"
-                            className="w-full text-sm border rounded p-1"
+                            className="w-full text-sm border rounded p-1 text-gray-900"
                             value={loc.hint}
                             onChange={(e) => updateLocation(idx, 'hint', e.target.value)}
                         />
@@ -344,6 +352,7 @@ const Create = () => {
             <input 
                 type="file" 
                 accept="image/*" 
+                multiple
                 className="hidden" 
                 onChange={handleImageUpload}
                 disabled={uploading}

@@ -143,6 +143,14 @@ export const regenerateCode = async (req: Request, res: Response) => {
 export const getTreasures = async (req: Request, res: Response) => {
   try {
     const userId = req.query.userId as string;
+    const filter = req.query.filter as string; // 'public', 'created', 'participated'
+    
+    // Validate UUID format to prevent query errors
+    const isValidUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
+
+    if (!isValidUUID && (filter === 'created' || filter === 'participated')) {
+        return res.json([]); // Can't fetch user specific lists without valid user
+    }
 
     let query = supabase
       .from("treasures")
@@ -154,46 +162,48 @@ export const getTreasures = async (req: Request, res: Response) => {
       .eq('is_active', true)
       .order('created_at', { ascending: false });
 
-    // Filter by userId if provided to show only user's treasures
-    // Or if we want to show public treasures AND user's private ones?
-    // Requirement: "只有自己可以看见" implies we want to filter list by creator_id = userId
-    // BUT usually home page shows ALL public treasures.
-    // If user means "When I create a treasure, it is visible to everyone, but I want it private initially?"
-    // The current createTreasure sets is_public: true by default.
+    console.debug("Querying treasures with userId:", userId);
     
-    // If the requirement is "The treasures I create should be private by default", we should change createTreasure.
-    // If the requirement is "I only want to see MY created treasures on the list", we filter here.
-    
-    // Assuming user wants to filter the LIST to see only their own for now based on "怎么只有自己可以看见呢" 
-    // context: "默认创建的寻宝全员可见" (Default created are public) -> "现在怎么只有自己可以看见呢" (How to make it so only I can see it?)
-    // Answer: We should change createTreasure to set is_public = false, OR allow filtering.
-    
-    // Let's modify createTreasure to accept is_public flag, defaulting to false? 
-    // Or just change the query here? 
-    // Re-reading: "默认创建的寻宝全员可见。现在怎么只有自己可以看见呢？" 
-    // This sounds like a request to change the behavior of CREATION to be private, OR the LISTING to respect privacy.
-    
-    // Let's assume the user wants to know HOW to make a treasure private.
-    // I will modify `createTreasure` to allow setting `is_public` and default it to `false` (private).
-    // AND modify `getTreasures` to show:
-    // 1. All public treasures
-    // 2. Private treasures created by the current user
-    
-    if (userId) {
-       // Logic: (is_public = true) OR (creator_id = userId)
-       // Supabase .or() syntax
-       query = query.or(`is_public.eq.true,creator_id.eq.${userId}`);
+    if (filter === 'participated' && isValidUUID) {
+        // 1. Get participated treasure IDs first
+        const { data: participations } = await supabase
+            .from("participations")
+            .select("treasure_id")
+            .eq("user_id", userId);
+            
+        const treasureIds = participations?.map(p => p.treasure_id) || [];
+        
+        if (treasureIds.length === 0) {
+            return res.json([]);
+        }
+        
+        query = query.in('id', treasureIds);
+        
+    } else if (filter === 'created' && isValidUUID) {
+        query = query.eq('creator_id', userId);
+        
+    } else if (filter === 'public') {
+        query = query.eq('is_public', true);
+        
     } else {
-       query = query.eq('is_public', true);
+        // Default behavior (fallback or 'all')
+        if (isValidUUID) {
+           // Show public treasures OR private treasures created by this user
+           query = query.or(`is_public.eq.true,creator_id.eq.${userId}`);
+        } else {
+           // Only show public treasures
+           query = query.eq('is_public', true);
+        }
     }
 
     const { data: treasures, error } = await query;
+//    console.debug("Raw query result:", treasures);
 
     if (error) throw error;
 
     const resultPromises = treasures.map(async (t: any) => {
         // 2. Get Progress
-        if (userId) {
+        if (isValidUUID) {
             const { data: participation } = await supabase
                 .from("participations")
                 .select("final_cost, is_completed")
@@ -292,13 +302,32 @@ export const getTreasureProgress = async (req: Request, res: Response) => {
         .eq("is_verified", true);
 
     const verifiedLocationIds = verifications?.map(v => v.location_id) || [];
+    
+    // Calculate Rank
+    // Only calculate if completed
+    let rank = 0;
+    if (participation.is_completed && participation.final_cost !== null) {
+        // Count how many completed participations have a lower (better) final_cost for this treasure
+        // OR same cost but earlier end_time (tie-breaker) - omitting tie-breaker for simplicity
+        const { count, error } = await supabase
+            .from("participations")
+            .select("id", { count: 'exact', head: true })
+            .eq("treasure_id", treasureId)
+            .eq("is_completed", true)
+            .lt("final_cost", participation.final_cost);
+        
+        if (!error) {
+            rank = (count || 0) + 1;
+        }
+    }
 
     res.json({ 
         verifiedLocationIds,
         verifications: verifications || [],
         hasParticipation: true,
         is_completed: participation.is_completed,
-        final_cost: participation.final_cost
+        final_cost: participation.final_cost,
+        rank: rank > 0 ? rank : null // Return rank if applicable
     });
 
   } catch (error: any) {
@@ -309,7 +338,7 @@ export const getTreasureProgress = async (req: Request, res: Response) => {
 
 export const startGame = async (req: Request, res: Response) => {
     try {
-        const { treasureId, userId } = req.body;
+        const { treasureId, userId, nickname } = req.body; // Accept nickname from frontend
         
         if (!treasureId || !userId) {
             return res.status(400).json({ error: "Missing treasureId or userId" });
@@ -321,8 +350,11 @@ export const startGame = async (req: Request, res: Response) => {
              await supabase.from('users').insert({
                 id: userId,
                 openid: `temp_${userId}`, 
-                nickname: 'Explorer',
+                nickname: nickname || 'Explorer', // Use provided nickname
             });
+        } else if (nickname && nickname !== 'Explorer') {
+            // Update nickname if provided and better than default
+             await supabase.from('users').update({ nickname }).eq('id', userId);
         }
 
         // Check if already started
@@ -448,9 +480,105 @@ export const createTreasure = async (req: Request, res: Response) => {
   }
 };
 
+export const getTreasureLeaderboard = async (req: Request, res: Response) => {
+  try {
+    const { id: treasureId } = req.params;
+    const { userId } = req.query;
+
+    if (!treasureId) {
+        return res.status(400).json({ error: "Missing treasureId" });
+    }
+
+    // 1. Fetch all completed participations for this treasure
+    // Ordered by cost (ASC) and time (ASC)
+    // NOTE: 'users' table might NOT have 'username' column if it's not synced from auth.users or schema differs.
+    // Let's check schema. If error says "column users_1.username does not exist", then it's not there.
+    // We should fallback to nickname only.
+    
+    const { data: allCompleted, error } = await supabase
+        .from("participations")
+        .select(`
+            id,
+            user_id,
+            final_cost,
+            end_time,
+            user:users(nickname, avatar_url)
+        `)
+        .eq("treasure_id", treasureId)
+        .eq("is_completed", true)
+        .order("final_cost", { ascending: true })
+        .order("end_time", { ascending: true })
+        .limit(100); // Limit to top 100 for performance, usually enough for context
+
+    if (error) throw error;
+    if (!allCompleted) return res.json([]);
+
+    // Add rank to each item
+    const rankedList = allCompleted.map((item: any, index: number) => ({
+        rank: index + 1,
+        user_id: item.user_id,
+        // Fallback: use nickname. If user registered via our simple flow, nickname IS the name they gave (or default Explorer)
+        // If we want real username (email/login), we need to query auth.users which is not directly accessible via public API usually,
+        // or we rely on what we stored in public.users table.
+        nickname: item.user?.nickname || 'Unknown Explorer',
+        avatar_url: item.user?.avatar_url,
+        final_cost: item.final_cost,
+        is_me: item.user_id === userId
+    }));
+
+    // 2. Construct response
+    // Requirement: Top 5 + (Gap) + User-1, User, User+1
+    
+    const top5 = rankedList.slice(0, 5);
+    let result = [...top5];
+    
+    if (userId) {
+        const userRankIndex = rankedList.findIndex(r => r.user_id === userId);
+        
+        if (userRankIndex !== -1) {
+            // User is in the list
+            const userRank = userRankIndex + 1;
+            
+            // If user is already in top 5, we don't need to do anything special
+            if (userRank > 5) {
+                // Determine neighbors range
+                // We want: [userRank-1, userRank, userRank+1]
+                // Indices: [userRankIndex-1, userRankIndex, userRankIndex+1]
+                
+                const start = Math.max(5, userRankIndex - 1); // Don't overlap with top 5
+                const end = Math.min(rankedList.length, userRankIndex + 2); // Slice end is exclusive
+                
+                const neighbors = rankedList.slice(start, end);
+                
+                if (neighbors.length > 0) {
+                     // If there is a gap between top5 and neighbors, frontend handles visual separator
+                     // But we can return them in a single list? 
+                     // Or better, return a structured object so frontend knows about the gap.
+                     // The requirement says "ellipsis", so frontend needs to know if there's a jump.
+                     // Let's just return the relevant rows.
+                     
+                     // Ensure we don't duplicate if overlap (handled by start index logic)
+                     result = [...result, ...neighbors];
+                }
+            }
+        }
+    }
+    
+    // Deduplicate just in case
+    const uniqueResult = Array.from(new Map(result.map(item => [item.user_id, item])).values())
+        .sort((a, b) => a.rank - b.rank);
+
+    res.json(uniqueResult);
+
+  } catch (error: any) {
+    console.error("Get Leaderboard Error:", error);
+    res.status(500).json({ error: "Failed to fetch leaderboard", details: error.message });
+  }
+};
+
 export const verifyLocation = async (req: Request, res: Response) => {
   try {
-    const { treasureId, locationId, photo } = req.body;
+    const { treasureId, locationId, photo, userLocation } = req.body;
     const userId = req.body.userId; // Middleware should populate this from token
 
     if (!treasureId || !locationId || !photo) {
@@ -475,16 +603,31 @@ export const verifyLocation = async (req: Request, res: Response) => {
     let userLat = 0;
     let userLng = 0;
 
+    // Priority: 1. EXIF data, 2. Browser Geolocation (most reliable for mobile web)
     try {
-        const coords = await parseGpsFromBuffer(candidateBuffer);
-        if (coords) {
-            userLat = coords.latitude;
-            userLng = coords.longitude;
-            console.log(`Extracted User GPS: ${userLat}, ${userLng}`);
+        const gpsData = await parseGpsFromBuffer(candidateBuffer);
+        if (gpsData && gpsData.latitude && gpsData.longitude) {
+            userLat = gpsData.latitude;
+            userLng = gpsData.longitude;
+            console.debug(`Extracted GPS from photo: ${userLng}, ${userLat}`);
         }
     } catch (exifErr) {
-        console.warn("Failed to extract GPS from candidate photo:", exifErr);
+        console.warn("Failed to extract GPS from photo:", exifErr);
     }
+    // If EXIF failed or no GPS, fallback to userLocation from request body
+    if (!userLat || !userLng) {
+        if (userLocation && userLocation.latitude && userLocation.longitude) {
+            userLat = userLocation.latitude;
+            userLng = userLocation.longitude;
+            console.debug(`Fallback to userLocation GPS: ${userLng}, ${userLat}`);
+        } else {
+            // return res.status(400).json({ error: "No valid location data found" });
+            console.warn("No valid location data found in request, proceeding with visual-only match.");
+            // Proceed with null/undefined location, imageService will handle strict mode
+        }
+    }
+
+
 
     // Compress candidate photo immediately for faster matching and later upload
     let processedCandidateBuffer: Buffer = candidateBuffer;
@@ -556,14 +699,21 @@ export const verifyLocation = async (req: Request, res: Response) => {
 
     // 4. Record Verification
     // Ensure user exists in public.users (for FK constraint)
-    const { data: userExists } = await supabase.from('users').select('id').eq('id', userId).single();
+    const { data: userExists } = await supabase.from('users').select('id, nickname').eq('id', userId).single();
     if (!userExists) {
          // Auto-create user if missing
+         // Try to fetch user metadata from Auth (if we had access, but we don't easily here without admin client)
+         // For now default to 'Explorer'
          await supabase.from('users').insert({
             id: userId,
             openid: `temp_${userId}`, 
             nickname: 'Explorer',
         });
+    } else if (userExists.nickname === 'Explorer') {
+        // OPTIONAL: If nickname is still default, try to update it?
+        // Since we can't easily access auth metadata here without the user's JWT or admin client,
+        // we might leave it. 
+        // BUT, if the frontend sends the nickname in the request body, we could update it.
     }
 
     // First, find or create participation record

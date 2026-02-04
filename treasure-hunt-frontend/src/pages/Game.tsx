@@ -93,6 +93,23 @@ const Game = () => {
   const [showJoinCodeModal, setShowJoinCodeModal] = useState(false);
   const [currentJoinCode, setCurrentJoinCode] = useState<string | null>(null);
   const [joinCodeExpires, setJoinCodeExpires] = useState<string | null>(null);
+  const [browserLocation, setBrowserLocation] = useState<{latitude: number, longitude: number} | null>(null);
+  const [locationStatus, setLocationStatus] = useState<'idle' | 'locating' | 'success' | 'error'>('idle');
+  const [locationErrorMsg, setLocationErrorMsg] = useState<string>("");
+
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const [leaderboardData, setLeaderboardData] = useState<any[]>([]);
+
+  const fetchLeaderboard = async () => {
+      if (!id) return;
+      try {
+          const data = await api.get(`/game/${id}/leaderboard?userId=${user?.id}`);
+          setLeaderboardData(data);
+          setShowLeaderboard(true);
+      } catch (e) {
+          console.error("Failed to fetch leaderboard", e);
+      }
+  };
 
   // Fetch locations and progress
   useEffect(() => {
@@ -159,7 +176,14 @@ const Game = () => {
 
   const handleStartGame = async () => {
       try {
-          await api.post('/game/start', { treasureId: id, userId: user?.id });
+          // Send nickname (from email prefix if available in metadata, or just 'Explorer')
+          const nickname = user?.user_metadata?.nickname || user?.email?.split('@')[0] || 'Explorer';
+          
+          await api.post('/game/start', { 
+              treasureId: id, 
+              userId: user?.id,
+              nickname: nickname
+          });
           setHasStarted(true);
           setShowMap(false); // Switch to photo view to start hunting
       } catch (e: any) {
@@ -259,38 +283,226 @@ const Game = () => {
     return null;
   }, [locations]);
 
-  const handleCapture = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const requestLocation = () => {
+      setLocationStatus('locating');
+      setLocationErrorMsg("");
+      
+      if (!('geolocation' in navigator)) {
+          setLocationStatus('error');
+          setLocationErrorMsg("Geolocation not supported.");
+          return;
+      }
+
+      // Check permission status first (if API available)
+      if (navigator.permissions && navigator.permissions.query) {
+          navigator.permissions.query({ name: 'geolocation' }).then((result) => {
+              console.log("Geolocation permission status:", result.state);
+              if (result.state === 'denied') {
+                  setLocationStatus('error');
+                  setLocationErrorMsg("Location permission denied. Please reset in browser settings.");
+              }
+          });
+      }
+
+      // Safety timeout in case browser hangs (e.g. permission prompt ignored)
+      const safetyTimeout = setTimeout(() => {
+          setLocationStatus((prev) => {
+              if (prev === 'locating') {
+                  return 'error';
+              }
+              return prev;
+          });
+          setLocationErrorMsg("Location request timed out. Please check permissions.");
+      }, 10000);
+
+      // Try low accuracy first
+      navigator.geolocation.getCurrentPosition(
+          (position) => {
+              clearTimeout(safetyTimeout);
+              console.log("Captured browser location (quick):", position.coords);
+              setBrowserLocation({
+                  latitude: position.coords.latitude,
+                  longitude: position.coords.longitude
+              });
+              setLocationStatus('success');
+          },
+          (err) => {
+              console.warn("Quick location failed, trying high accuracy:", err);
+              // Retry with high accuracy
+              navigator.geolocation.getCurrentPosition(
+                  (pos) => {
+                      clearTimeout(safetyTimeout);
+                      console.log("Captured browser location (high acc):", pos.coords);
+                      setBrowserLocation({
+                          latitude: pos.coords.latitude,
+                          longitude: pos.coords.longitude
+                      });
+                      setLocationStatus('success');
+                  },
+                  (finalErr) => {
+                      clearTimeout(safetyTimeout);
+                      console.warn("High accuracy location failed:", finalErr);
+                      setLocationStatus('error');
+                      setLocationErrorMsg(finalErr.message || "Location timeout.");
+                  },
+                  { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+              );
+          },
+          { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
+      );
+  };
+
+  useEffect(() => {
+    // Restore state from localStorage if page was reloaded (common on Android low memory)
+    const savedState = localStorage.getItem('game_photo_backup');
+    if (savedState) {
+        try {
+            const parsed = JSON.parse(savedState);
+            // Only restore if less than 5 minutes old
+            if (Date.now() - parsed.timestamp < 300000) {
+                setPhoto(parsed.photo);
+                setPhotoData(parsed.photoData);
+                console.log("Restored photo from backup");
+            }
+            // CRITICAL CHANGE: Do NOT remove item immediately.
+            // Wait for user to verify or explicitly clear it.
+            // localStorage.removeItem('game_photo_backup'); 
+        } catch (e) { /* ignore */ }
+    }
+  }, []);
+
+  // Compression helper
+  const compressImage = (file: File, quality: number = 0.7, maxWidth: number = 1200): Promise<string> => {
+      return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.readAsDataURL(file);
+          reader.onload = (event) => {
+              const img = new Image();
+              img.src = event.target?.result as string;
+              img.onload = () => {
+                  const canvas = document.createElement('canvas');
+                  let width = img.width;
+                  let height = img.height;
+                  
+                  if (width > maxWidth) {
+                      height = Math.round((height * maxWidth) / width);
+                      width = maxWidth;
+                  }
+                  
+                  canvas.width = width;
+                  canvas.height = height;
+                  const ctx = canvas.getContext('2d');
+                  ctx?.drawImage(img, 0, 0, width, height);
+                  resolve(canvas.toDataURL('image/jpeg', quality));
+              };
+          };
+      });
+  };
+
+  const handleCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    // Clear any old backup first to avoid confusion
+    localStorage.removeItem('game_photo_backup');
+    
     setImgError(false);
     const file = e.target.files?.[0];
     if (file) {
-      // 1. Immediate preview with Blob URL (prevents broken image icon)
+      console.log("File selected, size:", file.size);
+      
+      // 1. Immediate preview
       const previewUrl = URL.createObjectURL(file);
       setPhoto(previewUrl);
       setResult(null); 
       
-      // 2. Read as base64 in background for uploading
-      const reader = new FileReader();
-      reader.onload = (evt) => {
-          if (evt.target?.result) {
-              setPhotoData(evt.target.result as string);
-          }
-      };
-      reader.readAsDataURL(file);
+      try {
+          // Compress immediately to ensure it fits in localStorage and is fast
+          console.log("Compressing image...");
+          const compressedData = await compressImage(file);
+          console.log("Compression done, saving...");
+          
+          setPhotoData(compressedData);
+          setPhoto(compressedData); // Update preview to compressed version to match what is sent
+
+          // Backup to localStorage
+           try {
+               localStorage.setItem('game_photo_backup', JSON.stringify({
+                   photo: compressedData,
+                   photoData: compressedData,
+                   timestamp: Date.now()
+               }));
+               console.log("Backup saved successfully");
+           } catch (err) {
+               console.warn("Storage full, cannot backup photo", err);
+               alert("Storage full. Photo might be lost on reload.");
+           }
+           
+           // Get geolocation after image is safe
+           requestLocation();
+      } catch (err) {
+          console.error("Image processing failed", err);
+      }
     }
   };
+  
+  // Explicit button handler for permission request
+  const handleManualLocationRequest = () => {
+      requestLocation();
+  };
 
-  const handleVerify = async () => {
-    if (!photoData || !currentTarget) return;
+  const handleVerify = async (force: boolean = false) => {
+    // Debug why verify might not start
+    console.log("Verify triggered. PhotoData present:", !!photoData, "Target present:", !!currentTarget, "Force:", force);
+
+    if (!photoData || !currentTarget) {
+        if (!photoData) alert("No photo captured yet.");
+        return;
+    }
+    
     setVerifying(true);
+    
+    // Use current browserLocation (could be null)
+    let finalLocation = browserLocation;
+    
+    // Fallback: try to get location if missing ONLY if not forced
+    if (!force && !finalLocation && 'geolocation' in navigator) {
+        try {
+            console.log("Attempting fallback geolocation...");
+             await new Promise<void>((resolve) => {
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => {
+                        finalLocation = {
+                            latitude: pos.coords.latitude,
+                            longitude: pos.coords.longitude
+                        };
+                        console.log("Fallback location success:", finalLocation);
+                        resolve();
+                    },
+                    (err) => {
+                        console.error("Fallback location failed:", err);
+                        // Do not block verification if fallback fails
+                        // setLocationErrorMsg(err.message); 
+                        resolve();
+                    },
+                    { timeout: 5000, enableHighAccuracy: true }
+                );
+            });
+        } catch (e) { /* ignore */ }
+    }
+    
+    console.log("Verifying with location:", finalLocation);
 
     try {
         const res = await api.post('/game/verify-location', {
           treasureId: id,
           locationId: currentTarget.id,
           photo: photoData,
-          userId: user?.id
+          userId: user?.id,
+          // If forced or no location found, send 0,0 to signal "no gps"
+          userLocation: finalLocation || { latitude: 0, longitude: 0 }
         });
         setResult(res);
+        
+        // Clear backup on successful API call
+        localStorage.removeItem('game_photo_backup');
         
         // Update local state if verified
         if (res.verified) {
@@ -371,6 +583,41 @@ const Game = () => {
       setResult(null);
   };
 
+  // Swipe handlers
+  const touchStartX = useRef<number | null>(null);
+  const touchEndX = useRef<number | null>(null);
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.targetTouches[0].clientX;
+    touchEndX.current = null; // Reset
+  };
+
+  const onTouchMove = (e: React.TouchEvent) => {
+    touchEndX.current = e.targetTouches[0].clientX;
+  };
+
+  const onTouchEnd = () => {
+    if (!touchStartX.current || !touchEndX.current) return;
+    
+    const distance = touchStartX.current - touchEndX.current;
+    const isLeftSwipe = distance > 50;
+    const isRightSwipe = distance < -50;
+
+    if (isLeftSwipe) {
+        // Swiped Left -> Next Photo
+        if (currentLocIndex < locations.length - 1) {
+            nextPhoto();
+        }
+    }
+    
+    if (isRightSwipe) {
+        // Swiped Right -> Prev Photo
+        if (currentLocIndex > 0) {
+            prevPhoto();
+        }
+    }
+  };
+
   if (loading) return <div className="flex h-screen items-center justify-center text-white bg-gray-900">Loading...</div>;
   if (!currentTarget) return <div className="flex h-screen items-center justify-center text-white bg-gray-900">No locations found.</div>;
 
@@ -378,6 +625,75 @@ const Game = () => {
   if (isCompleted && finalResult) {
       return (
         <div className="min-h-screen bg-gray-900 text-white p-6 overflow-y-auto">
+            {/* Leaderboard Modal */}
+            {showLeaderboard && (
+                <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4" onClick={() => setShowLeaderboard(false)}>
+                    <div className="bg-gray-800 rounded-2xl w-full max-w-md max-h-[80vh] overflow-hidden flex flex-col shadow-2xl border border-gray-700" onClick={e => e.stopPropagation()}>
+                        <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-900/50">
+                            <h3 className="font-bold text-lg flex items-center gap-2">
+                                <span className="text-yellow-500">🏆</span> Leaderboard
+                            </h3>
+                            <button onClick={() => setShowLeaderboard(false)} className="p-1 hover:bg-gray-700 rounded-full">
+                                <XCircle size={24} className="text-gray-400" />
+                            </button>
+                        </div>
+                        <div className="overflow-y-auto p-4 space-y-2">
+                            {leaderboardData.length === 0 ? (
+                                <div className="text-center text-gray-500 py-8">No records yet. Be the first!</div>
+                            ) : (
+                                leaderboardData.map((item, idx) => {
+                                    // Check for gap (if current rank is not previous rank + 1)
+                                    const prevRank = idx > 0 ? leaderboardData[idx-1].rank : 0;
+                                    const isGap = idx > 0 && item.rank > prevRank + 1;
+                                    
+                                    return (
+                                        <React.Fragment key={item.user_id}>
+                                            {isGap && (
+                                                <div className="flex justify-center py-2">
+                                                    <div className="flex gap-1">
+                                                        <div className="w-1 h-1 bg-gray-600 rounded-full"></div>
+                                                        <div className="w-1 h-1 bg-gray-600 rounded-full"></div>
+                                                        <div className="w-1 h-1 bg-gray-600 rounded-full"></div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                            <div className={`flex items-center gap-3 p-3 rounded-xl border ${item.is_me ? 'bg-blue-900/30 border-blue-500/50' : 'bg-gray-700/30 border-transparent'}`}>
+                                                <div className={`
+                                                    w-8 h-8 flex items-center justify-center rounded-full font-bold text-sm
+                                                    ${item.rank === 1 ? 'bg-yellow-500 text-black' : 
+                                                      item.rank === 2 ? 'bg-gray-300 text-black' :
+                                                      item.rank === 3 ? 'bg-orange-600 text-white' : 'bg-gray-700 text-gray-400'}
+                                                `}>
+                                                    {item.rank}
+                                                </div>
+                                                <div className="w-8 h-8 rounded-full bg-gray-600 overflow-hidden flex-shrink-0">
+                                                    {item.avatar_url ? (
+                                                        <img src={item.avatar_url} className="w-full h-full object-cover" />
+                                                    ) : (
+                                                        <div className="w-full h-full flex items-center justify-center text-[10px] uppercase">
+                                                            {item.nickname.substring(0,2)}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="font-medium truncate flex items-center gap-2">
+                                                        {item.nickname}
+                                                        {item.is_me && <span className="text-[10px] bg-blue-600 px-1.5 rounded text-white">YOU</span>}
+                                                    </div>
+                                                </div>
+                                                <div className="font-mono text-green-400 font-bold">
+                                                    {item.final_cost}s
+                                                </div>
+                                            </div>
+                                        </React.Fragment>
+                                    );
+                                })
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <div className="max-w-2xl mx-auto">
                 <div className="text-center mb-8">
                     <div className="inline-block p-4 rounded-full bg-green-500/20 mb-4">
@@ -392,10 +708,16 @@ const Game = () => {
                         <span className="block text-gray-400 text-sm mb-1">Total Time</span>
                         <span className="text-2xl font-mono font-bold">{finalResult.final_cost}s</span>
                     </div>
-                    <div className="bg-gray-800 p-4 rounded-xl text-center">
-                        <span className="block text-gray-400 text-sm mb-1">Rank</span>
-                        <span className="text-2xl font-mono font-bold">#1</span> 
-                        {/* Rank logic needs backend support, hardcoded for now or fetch rank */}
+                    <div 
+                        className="bg-gray-800 p-4 rounded-xl text-center cursor-pointer hover:bg-gray-700 transition active:scale-95 border border-transparent hover:border-gray-600 relative group"
+                        onClick={fetchLeaderboard}
+                    >
+                        <span className="block text-gray-400 text-sm mb-1 flex items-center justify-center gap-1">
+                            Rank <span className="text-[10px] bg-gray-700 px-1 rounded group-hover:bg-gray-600">View All</span>
+                        </span>
+                        <span className="text-2xl font-mono font-bold text-blue-400">
+                            {finalResult.rank ? `#${finalResult.rank}` : '--'}
+                        </span> 
                     </div>
                 </div>
 
@@ -470,7 +792,7 @@ const Game = () => {
       // Also need Marker/Popup from leaflet.
       
       return (
-        <div className="flex flex-col h-screen bg-gray-900 text-white relative">
+        <div className="flex flex-col h-[100dvh] bg-gray-900 text-white relative overflow-hidden">
              <button onClick={() => {
                  if (hasStarted) {
                      setShowMap(false); // If started, Back arrow on map goes to Game
@@ -549,15 +871,15 @@ const Game = () => {
 
                  {/* Start Button Overlay - ONLY if not started */}
                  {!hasStarted && (
-                     <div className="absolute bottom-0 left-0 right-0 z-[1000] flex flex-col items-center justify-end pb-12 bg-gradient-to-t from-black/80 to-transparent h-1/3 pointer-events-none">
+                     <div className="absolute bottom-0 left-0 right-0 z-[1000] flex flex-col items-center justify-end pb-8 md:pb-12 bg-gradient-to-t from-black/90 via-black/60 to-transparent pointer-events-none min-h-[300px]">
                          <button 
                             onClick={handleStartGame}
-                            className="pointer-events-auto bg-green-600 hover:bg-green-500 text-white font-bold text-xl px-12 py-4 rounded-full shadow-xl transform transition hover:scale-105 animate-pulse flex items-center gap-2"
+                            className="pointer-events-auto bg-green-600 hover:bg-green-500 text-white font-bold text-xl px-12 py-4 rounded-full shadow-xl transform transition hover:scale-105 animate-pulse flex items-center gap-2 mb-4"
                          >
                              <MapIcon size={24} />
                              Start Hunt
                          </button>
-                         <p className="text-gray-300 text-sm mt-4 font-medium">Find all locations within the area</p>
+                         <p className="text-gray-300 text-sm font-medium mb-4">Find all locations within the area</p>
                      </div>
                  )}
              </div>
@@ -567,7 +889,7 @@ const Game = () => {
 
   // Render Game View (Photos & Camera)
   return (
-    <div className="flex flex-col h-screen bg-gray-900 text-white">
+    <div className="flex flex-col h-[100dvh] bg-gray-900 text-white overflow-hidden">
       {/* Top: Header & Reference Photos (Swipeable) */}
       <div className="relative h-1/2 bg-gray-800 flex flex-col">
          {/* Back Button */}
@@ -589,7 +911,12 @@ const Game = () => {
          </button>
 
          {/* Main Photo Area */}
-         <div className="flex-1 relative overflow-hidden bg-black">
+         <div 
+            className="flex-1 relative overflow-hidden bg-black"
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
+         >
              {locations.map((loc, index) => (
                  <img
                     key={loc.id}
@@ -813,40 +1140,91 @@ const Game = () => {
         )}
       </div>
 
-      {/* Footer Controls */}
-      <div className="h-24 bg-black flex items-center justify-center p-4 z-10">
-        {!result && !isVerified && (
-            <>
-                {photo ? (
-                    <button 
-                        onClick={handleVerify}
-                        disabled={verifying}
-                        className="w-full max-w-xs bg-green-600 text-white font-bold text-lg px-8 py-4 rounded-full disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:bg-green-500 transition"
-                    >
-                        {verifying ? (
-                            <span className="flex items-center justify-center gap-2">
-                                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
-                                Verifying...
-                            </span>
-                        ) : 'Verify'}
-                    </button>
-                ) : (
-                    <label className="cursor-pointer group">
-                        <div className="w-16 h-16 rounded-full border-4 border-white flex items-center justify-center group-hover:bg-white/10 transition">
-                            <div className="w-14 h-14 bg-white rounded-full"></div>
+      {/* Footer Controls - Hide when result is showing (success/fail) to give space to action buttons */}
+      {/* Or just make it part of the flow instead of fixed/sticky */}
+      {!result && (
+        <div className="w-full h-24 bg-black flex items-center justify-center p-4 z-50 flex-col gap-2 flex-shrink-0 border-t border-gray-800">
+            {/* Location Status Indicator */}
+            {photo && !result && !isVerified && (
+                <div className="text-xs text-gray-400 flex flex-col items-center gap-1 mb-1 w-full relative z-50">
+                    {/* Always show this button if not successful, for debugging */}
+                    {locationStatus !== 'success' && (
+                        <div className="flex gap-2">
+                            <button 
+                                onClick={handleManualLocationRequest}
+                                className="text-xs bg-gray-700 text-white px-3 py-2 rounded shadow-lg active:bg-gray-600 transition"
+                            >
+                                Retry GPS
+                            </button>
+                            <button 
+                                onClick={() => handleVerify(true)}
+                                disabled={verifying}
+                                className="text-xs bg-blue-600 text-white px-3 py-2 rounded shadow-lg active:bg-blue-700 transition font-bold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                            >
+                                {verifying ? (
+                                    <>
+                                        <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+                                        Verifying...
+                                    </>
+                                ) : (
+                                    "Force Verify (No GPS)"
+                                )}
+                            </button>
                         </div>
-                        <input 
-                            type="file" 
-                            accept="image/*" 
-                            capture="environment" 
-                            className="hidden" 
-                            onChange={handleCapture}
-                        />
-                    </label>
-                )}
-            </>
-        )}
-      </div>
+                    )}
+                    {locationStatus === 'locating' && (
+                        <span className="flex items-center gap-1 text-yellow-500 animate-pulse mt-1">
+                            <MapPin size={12} /> Locating GPS...
+                        </span>
+                    )}
+                    {locationStatus === 'success' && (
+                        <span className="flex items-center gap-1 text-green-500 mt-1">
+                            <MapPin size={12} /> GPS Ready
+                        </span>
+                    )}
+                    {locationStatus === 'error' && (
+                        <div className="flex flex-col items-center gap-1 mt-1">
+                            <span className="flex items-center gap-1 text-red-500 text-[10px] text-center max-w-[200px]">
+                                <XCircle size={10} /> {locationErrorMsg}
+                            </span>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {!result && !isVerified && (
+                <>
+                    {photo ? (
+                        <button 
+                            onClick={() => handleVerify(false)}
+                            disabled={verifying}
+                            className="w-full max-w-xs bg-green-600 text-white font-bold text-lg px-8 py-4 rounded-full disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:bg-green-500 transition"
+                        >
+                            {verifying ? (
+                                <span className="flex items-center justify-center gap-2">
+                                    <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+                                    Verifying...
+                                </span>
+                            ) : 'Verify'}
+                        </button>
+                    ) : (
+                        <label className="cursor-pointer group">
+                            <div className="w-16 h-16 rounded-full border-4 border-white flex items-center justify-center group-hover:bg-white/10 transition">
+                                <div className="w-14 h-14 bg-white rounded-full"></div>
+                            </div>
+                            <input 
+                                type="file" 
+                                accept="image/*" 
+                                capture="environment" 
+                                className="hidden" 
+                                onChange={handleCapture}
+                            />
+                        </label>
+                    )}
+                </>
+            )}
+        </div>
+      )}
     </div>
   );
 };
